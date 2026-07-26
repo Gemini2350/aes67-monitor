@@ -37,13 +37,13 @@
 		<div
 			class="card-header d-flex align-items-center"
 			style="cursor: pointer"
-			@click="toggleDevice(device.id)"
+			@click="toggleNmosDevice(device.id)"
 		>
 			<i
 				class="bi me-2"
 				:class="{
-					'bi-chevron-down': !isCollapsed(device.id),
-					'bi-chevron-right': isCollapsed(device.id),
+					'bi-chevron-down': !isNmosDeviceCollapsed(device.id),
+					'bi-chevron-right': isNmosDeviceCollapsed(device.id),
 				}"
 			></i>
 			<strong>{{ device.label }}</strong>
@@ -53,7 +53,7 @@
 			</span>
 			<span class="badge bg-primary ms-auto">{{ device.streams.length }}</span>
 		</div>
-		<div class="card-body p-0" v-if="!isCollapsed(device.id)">
+		<div class="card-body p-0" v-if="!isNmosDeviceCollapsed(device.id)">
 			<table class="table table-sm table-borderless mb-0">
 				<thead>
 					<tr>
@@ -155,22 +155,13 @@ import {
 	playStream,
 	playing,
 	getCurrentSupportedSampleRates,
+	toggleNmosDevice,
+	isNmosDeviceCollapsed,
 } from "../../app.js";
-import { ref } from "vue";
 
 export default {
 	name: "NmosStreamsPage",
 	setup() {
-		const collapsedDevices = ref({});
-
-		function toggleDevice(id) {
-			collapsedDevices.value[id] = !collapsedDevices.value[id];
-		}
-
-		function isCollapsed(id) {
-			return !!collapsedDevices.value[id];
-		}
-
 		return {
 			searchNmosStreams,
 			nmosStatus,
@@ -182,8 +173,8 @@ export default {
 			playStream,
 			playing,
 			getCurrentSupportedSampleRates,
-			toggleDevice,
-			isCollapsed,
+			toggleNmosDevice,
+			isNmosDeviceCollapsed,
 		};
 	},
 };

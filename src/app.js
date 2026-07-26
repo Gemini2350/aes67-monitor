@@ -194,6 +194,25 @@ export const viewStream = (stream) => {
 	selectedStream.value = stream;
 };
 
+export const toggleNmosDevice = (deviceId) => {
+	if (!persistentData.value.nmosCollapsed) {
+		persistentData.value.nmosCollapsed = {};
+	}
+	if (persistentData.value.nmosCollapsed[deviceId]) {
+		delete persistentData.value.nmosCollapsed[deviceId];
+	} else {
+		persistentData.value.nmosCollapsed[deviceId] = true;
+	}
+	updatePersistentData("nmosCollapsed");
+};
+
+export const isNmosDeviceCollapsed = (deviceId) => {
+	return !!(
+		persistentData.value.nmosCollapsed &&
+		persistentData.value.nmosCollapsed[deviceId]
+	);
+};
+
 export const nmosStreamCount = computed(() => {
 	return nmosStreams.value.reduce(
 		(count, device) => count + device.streams.length,
