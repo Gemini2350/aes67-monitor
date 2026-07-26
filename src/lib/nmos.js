@@ -1,5 +1,6 @@
 const http = require("http");
 const os = require("os");
+const fs = require("fs");
 const dns = require("dns");
 const sdpTransform = require("sdp-transform");
 const { Bonjour } = require("bonjour-service");
@@ -102,6 +103,110 @@ const fetchJSON = async function (url, options) {
 };
 
 /**
+ * Reads the DNS search domains configured on the host (resolv.conf).
+ */
+const getSystemSearchDomains = function () {
+	try {
+		const content = fs.readFileSync("/etc/resolv.conf", "utf8");
+		const domains = [];
+		for (const line of content.split("\n")) {
+			const trimmed = line.trim();
+			if (/^(search|domain)\s/.test(trimmed)) {
+				for (const domain of trimmed.split(/\s+/).slice(1)) {
+					if (domain && domains.indexOf(domain) === -1) {
+						domains.push(domain);
+					}
+				}
+			}
+		}
+		return domains;
+	} catch (error) {
+		return [];
+	}
+};
+
+/**
+ * DNS-SD (RFC 6763) browse via unicast DNS: PTR on the service type,
+ * then SRV + TXT per instance, then A record of the target.
+ * Falls back to a direct SRV query on the service type if no PTR
+ * records exist. Returns a base URL or null.
+ */
+const browseDnsSd = async function (resolver, serviceTypes, domain) {
+	const candidates = [];
+
+	for (const serviceType of serviceTypes) {
+		const typeFqdn = serviceType + "." + domain;
+
+		let instances = [];
+		try {
+			instances = await resolver.resolvePtr(typeFqdn);
+		} catch (error) {
+			// no PTR records, try a direct SRV lookup on the type below
+		}
+		if (instances.length == 0) {
+			instances = [typeFqdn];
+		}
+
+		for (const instance of instances) {
+			let srvRecords = [];
+			try {
+				srvRecords = await resolver.resolveSrv(instance);
+			} catch (error) {
+				continue;
+			}
+
+			// TXT record: api_proto, pri (IS-04 DNS-SD TXT keys)
+			let txtPri = 100;
+			let proto = "http";
+			try {
+				const txtRecords = await resolver.resolveTxt(instance);
+				for (const entry of txtRecords.flat()) {
+					const [key, value] = entry.split("=");
+					if (key == "pri" && !isNaN(parseInt(value))) {
+						txtPri = parseInt(value);
+					}
+					if (key == "api_proto" && value) {
+						proto = value;
+					}
+				}
+			} catch (error) {
+				// TXT is optional for our purposes
+			}
+
+			for (const srv of srvRecords) {
+				candidates.push({
+					target: srv.name,
+					port: srv.port,
+					priority: txtPri * 65536 + srv.priority,
+					proto: proto,
+				});
+			}
+		}
+
+		if (candidates.length > 0) {
+			break; // prefer the first (current) service type name
+		}
+	}
+
+	candidates.sort((a, b) => a.priority - b.priority);
+
+	for (const candidate of candidates) {
+		let address = candidate.target;
+		try {
+			const addresses = await resolver.resolve4(candidate.target);
+			if (addresses.length > 0) {
+				address = addresses[0];
+			}
+		} catch (error) {
+			// keep the hostname, the system resolver may still know it
+		}
+		return candidate.proto + "://" + address + ":" + candidate.port;
+	}
+
+	return null;
+};
+
+/**
  * Discovers the registry depending on the configured mode.
  * Sets registrationBase and queryBase.
  */
@@ -116,37 +221,44 @@ const discoverRegistry = async function () {
 	if (config.mode == "unicast") {
 		try {
 			const resolver = new dns.promises.Resolver({ timeout: 3000, tries: 2 });
-			resolver.setServers([config.dnsServer]);
+			resolver.setServers(
+				config.dnsServer ? [config.dnsServer] : dns.getServers()
+			);
 
-			const lookupSrv = async function (service) {
-				const records = await resolver.resolveSrv(
-					service + "." + config.domain
+			const domains = config.domain
+				? [config.domain]
+				: getSystemSearchDomains();
+
+			if (domains.length == 0) {
+				log("No DNS search domain configured on this host");
+				sendStatus(
+					null,
+					"No DNS search domain found - configure one in the settings"
 				);
-				if (records.length == 0) {
-					return null;
-				}
-				records.sort((a, b) => a.priority - b.priority);
-				const record = records[0];
-				let address = record.name;
-				try {
-					const addresses = await resolver.resolve4(record.name);
-					if (addresses.length > 0) {
-						address = addresses[0];
-					}
-				} catch (e) {
-					// use hostname as-is if no A record resolvable via this server
-				}
-				return "http://" + address + ":" + record.port;
-			};
-
-			const regBase = await lookupSrv("_nmos-register._tcp");
-			if (!regBase) {
 				return false;
 			}
-			const qryBase = await lookupSrv("_nmos-query._tcp");
-			registrationBase = regBase + "/x-nmos/registration/" + apiVersion;
-			queryBase = (qryBase || regBase) + "/x-nmos/query/" + apiVersion;
-			return true;
+
+			for (const domain of domains) {
+				const regBase = await browseDnsSd(
+					resolver,
+					["_nmos-register._tcp", "_nmos-registration._tcp"],
+					domain
+				);
+				if (!regBase) {
+					continue;
+				}
+				const qryBase = await browseDnsSd(
+					resolver,
+					["_nmos-query._tcp"],
+					domain
+				);
+
+				registrationBase = regBase + "/x-nmos/registration/" + apiVersion;
+				queryBase = (qryBase || regBase) + "/x-nmos/query/" + apiVersion;
+				log("DNS-SD found registry in domain", domain, ":", regBase);
+				return true;
+			}
+			return false;
 		} catch (error) {
 			log("Unicast DNS-SD discovery failed:", error.message);
 			return false;

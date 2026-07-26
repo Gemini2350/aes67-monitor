@@ -118,8 +118,8 @@
 				v-model="persistentData.settings.nmosMode"
 				:disabled="!persistentData.settings.nmosEnabled"
 			>
-				<option value="mdns">mDNS (multicast DNS-SD)</option>
 				<option value="unicast">DNS-SD Unicast</option>
+				<option value="mdns">mDNS (multicast DNS-SD)</option>
 				<option value="static">Static Registry Address</option>
 			</select>
 			<template v-if="persistentData.settings.nmosMode == 'static'">
@@ -151,7 +151,7 @@
 			</template>
 			<template v-if="persistentData.settings.nmosMode == 'unicast'">
 				<label for="nmos-dns-server-input" class="form-label"
-					>DNS Server</label
+					>DNS Server (optional)</label
 				>
 				<div class="input-group mb-3">
 					<input
@@ -159,12 +159,12 @@
 						id="nmos-dns-server-input"
 						v-model="persistentData.settings.nmosDnsServer"
 						class="form-control"
-						placeholder="192.168.1.1"
+						placeholder="Host DNS server"
 						:disabled="!persistentData.settings.nmosEnabled"
 					/>
 				</div>
 				<label for="nmos-domain-input" class="form-label"
-					>Search Domain</label
+					>Search Domain (optional)</label
 				>
 				<div class="input-group mb-3">
 					<input
@@ -172,9 +172,13 @@
 						id="nmos-domain-input"
 						v-model="persistentData.settings.nmosDomain"
 						class="form-control"
-						placeholder="nmos.example.com"
+						placeholder="Host search domain"
 						:disabled="!persistentData.settings.nmosEnabled"
 					/>
+				</div>
+				<div class="form-text mb-3">
+					Leave empty to use the DNS server and search domain configured on
+					this host.
 				</div>
 			</template>
 		</div>

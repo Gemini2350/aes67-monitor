@@ -20,7 +20,7 @@ const defaultSettings = {
 	sdpDeleteTimeout: 300,
 	sidebarCollapsed: false,
 	nmosEnabled: false,
-	nmosMode: "mdns",
+	nmosMode: "unicast",
 	nmosRegistryHost: "",
 	nmosRegistryPort: 80,
 	nmosDnsServer: "",
