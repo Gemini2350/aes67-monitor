@@ -25,7 +25,8 @@
 		"core-js": "^3.8.3",
 		"electron-store": "^8.2.0",
 		"sdp-transform": "^2.15.0",
-		"vue": "^3.2.13"
+		"vue": "^3.2.13",
+		"ws": "^8.21.1"
 	},
 	"devDependencies": {
 		"@babel/core": "^7.12.16",

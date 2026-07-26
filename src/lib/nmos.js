@@ -3,6 +3,7 @@ const os = require("os");
 const dns = require("dns");
 const sdpTransform = require("sdp-transform");
 const { Bonjour } = require("bonjour-service");
+const WebSocket = require("ws");
 
 const supportedSampleRates = [16000, 32000, 44100, 48000, 88200, 96000, 192000];
 
@@ -20,6 +21,14 @@ let httpServer = null;
 let bonjour = null;
 let manifestCache = {};
 let lastStreamsJSON = "";
+let connecting = false;
+
+// Query API websocket subscription state
+const SUBSCRIPTION_PATHS = ["/nodes", "/devices", "/senders"];
+let subscriptions = []; // [{resourcePath, ws}]
+let resources = { nodes: {}, devices: {}, senders: {} };
+let usePolling = false;
+let rebuildTimer = null;
 
 // IS-05 receiver connection state
 let receiverActive = {
@@ -366,6 +375,7 @@ const heartbeat = async function () {
 		registered = false;
 		registrationBase = null;
 		queryBase = null;
+		closeSubscriptions();
 		sendStatus(null, "Registry unreachable: " + error.message);
 	}
 };
@@ -517,10 +527,59 @@ const fetchManifest = async function (sender) {
 };
 
 /**
- * Polls the query API for senders and groups them by device.
+ * Groups senders by device, fetches manifests and sends the result
+ * to the main process if something changed.
+ */
+const buildAndSendGroups = async function (senderList, deviceMap, nodeMap) {
+	// Clean manifest cache of disappeared senders
+	const senderIds = new Set(senderList.map((sender) => sender.id));
+	for (const key of Object.keys(manifestCache)) {
+		if (!senderIds.has(key)) {
+			delete manifestCache[key];
+		}
+	}
+
+	const groups = {};
+	for (const sender of senderList) {
+		const stream = await fetchManifest(sender);
+		const device = deviceMap[sender.device_id];
+		const node = device ? nodeMap[device.node_id] : null;
+		const groupId = sender.device_id || "unknown";
+
+		if (!groups[groupId]) {
+			groups[groupId] = {
+				id: groupId,
+				label: device ? device.label : "Unknown Device",
+				description: device && device.description ? device.description : "",
+				nodeLabel: node ? node.label : "",
+				hostname: node && node.hostname ? node.hostname : "",
+				streams: [],
+			};
+		}
+
+		groups[groupId].streams.push(stream);
+	}
+
+	const groupList = Object.values(groups);
+	groupList.sort((a, b) => a.label.localeCompare(b.label));
+	for (const group of groupList) {
+		group.streams.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+	}
+
+	// Only send if something changed
+	const json = JSON.stringify(groupList);
+	if (json != lastStreamsJSON) {
+		lastStreamsJSON = json;
+		process.send({ type: "streams", data: groupList });
+	}
+};
+
+/**
+ * Polls the query API for senders (fallback if websocket subscriptions
+ * are not available).
  */
 const pollQuery = async function () {
-	if (!config || !config.enabled || !queryBase) {
+	if (!config || !config.enabled || !queryBase || !usePolling) {
 		return;
 	}
 
@@ -552,51 +611,176 @@ const pollQuery = async function () {
 			deviceMap[device.id] = device;
 		}
 
-		// Clean manifest cache of disappeared senders
-		const senderIds = new Set(senders.json.map((sender) => sender.id));
-		for (const key of Object.keys(manifestCache)) {
-			if (!senderIds.has(key)) {
-				delete manifestCache[key];
-			}
-		}
-
-		const groups = {};
-		for (const sender of senders.json) {
-			const stream = await fetchManifest(sender);
-			const device = deviceMap[sender.device_id];
-			const node = device ? nodeMap[device.node_id] : null;
-			const groupId = sender.device_id || "unknown";
-
-			if (!groups[groupId]) {
-				groups[groupId] = {
-					id: groupId,
-					label: device ? device.label : "Unknown Device",
-					description: device && device.description ? device.description : "",
-					nodeLabel: node ? node.label : "",
-					hostname: node && node.hostname ? node.hostname : "",
-					streams: [],
-				};
-			}
-
-			groups[groupId].streams.push(stream);
-		}
-
-		const groupList = Object.values(groups);
-		groupList.sort((a, b) => a.label.localeCompare(b.label));
-		for (const group of groupList) {
-			group.streams.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-		}
-
-		// Only send if something changed
-		const json = JSON.stringify(groupList);
-		if (json != lastStreamsJSON) {
-			lastStreamsJSON = json;
-			process.send({ type: "streams", data: groupList });
-		}
+		await buildAndSendGroups(senders.json, deviceMap, nodeMap);
 	} catch (error) {
 		log("Query error:", error.message);
 		queryBase = null;
 		sendStatus(null, "Query API unreachable: " + error.message);
+	}
+};
+
+/**
+ * Rebuilds the device groups from the websocket-synced resource maps.
+ * Debounced, as grains often arrive in bursts.
+ */
+const scheduleRebuild = function () {
+	if (rebuildTimer) {
+		clearTimeout(rebuildTimer);
+	}
+	rebuildTimer = setTimeout(async function () {
+		rebuildTimer = null;
+		await buildAndSendGroups(
+			Object.values(resources.senders),
+			resources.devices,
+			resources.nodes
+		);
+	}, 200);
+};
+
+/**
+ * Handles an incoming IS-04 query websocket grain.
+ */
+const handleGrain = function (message) {
+	if (!message || message.grain_type != "event" || !message.grain) {
+		return;
+	}
+
+	const topic = (message.grain.topic || "").replace(/\//g, ""); // "/senders/" -> "senders"
+	if (!resources[topic] || !Array.isArray(message.grain.data)) {
+		return;
+	}
+
+	for (const event of message.grain.data) {
+		if (event.post) {
+			// added or modified
+			resources[topic][event.post.id] = event.post;
+		} else if (event.pre) {
+			// removed
+			delete resources[topic][event.pre.id];
+		}
+	}
+
+	scheduleRebuild();
+};
+
+/**
+ * Closes all query websocket subscriptions.
+ */
+const closeSubscriptions = function () {
+	for (const subscription of subscriptions) {
+		subscription.closed = true;
+		try {
+			subscription.ws.close();
+		} catch (e) {
+			// ignore
+		}
+	}
+	subscriptions = [];
+	resources = { nodes: {}, devices: {}, senders: {} };
+};
+
+/**
+ * Handles the loss of the query websocket connection: clears the query
+ * state so the discovery timer reconnects and resubscribes.
+ */
+const onSubscriptionLost = function (reason) {
+	if (subscriptions.length == 0) {
+		return; // already handled or shut down
+	}
+	log("Query websocket lost:", reason);
+	closeSubscriptions();
+	queryBase = null;
+	sendStatus(null, "Query API connection lost");
+};
+
+/**
+ * Creates a websocket subscription for one resource path.
+ */
+const subscribeResourcePath = async function (resourcePath) {
+	const result = await fetchJSON(queryBase + "/subscriptions", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			max_update_rate_ms: 100,
+			resource_path: resourcePath,
+			params: {},
+			persist: false,
+			secure: false,
+		}),
+	});
+
+	if (
+		(result.status != 200 && result.status != 201) ||
+		!result.json ||
+		!result.json.ws_href
+	) {
+		throw new Error(
+			"Subscription for " + resourcePath + " failed with status " + result.status
+		);
+	}
+
+	return new Promise((resolve, reject) => {
+		const ws = new WebSocket(result.json.ws_href);
+		const subscription = { resourcePath, ws, closed: false };
+
+		ws.on("open", function () {
+			subscriptions.push(subscription);
+			resolve(subscription);
+		});
+
+		ws.on("message", function (data) {
+			try {
+				handleGrain(JSON.parse(data.toString()));
+			} catch (error) {
+				log("Invalid grain received:", error.message);
+			}
+		});
+
+		ws.on("close", function () {
+			if (!subscription.closed) {
+				onSubscriptionLost(resourcePath + " websocket closed");
+			}
+		});
+
+		ws.on("error", function (error) {
+			if (subscriptions.includes(subscription)) {
+				if (!subscription.closed) {
+					onSubscriptionLost(error.message);
+				}
+			} else {
+				reject(error);
+			}
+		});
+	});
+};
+
+/**
+ * Subscribes to nodes, devices and senders via the query websocket API.
+ * The registry sends the current state as initial grains after connecting.
+ */
+const setupSubscriptions = async function () {
+	closeSubscriptions();
+	for (const resourcePath of SUBSCRIPTION_PATHS) {
+		await subscribeResourcePath(resourcePath);
+	}
+	log("Query websocket subscriptions established");
+};
+
+/**
+ * Starts the query feed: websocket subscriptions with polling fallback.
+ */
+const startQueryFeed = async function () {
+	try {
+		await setupSubscriptions();
+		usePolling = false;
+	} catch (error) {
+		log(
+			"Websocket subscriptions unavailable, falling back to polling:",
+			error.message
+		);
+		closeSubscriptions();
+		usePolling = true;
+		await pollQuery();
 	}
 };
 
@@ -899,6 +1083,7 @@ const start = async function () {
 		heartbeatTimer = setInterval(heartbeat, 5000);
 	}
 	if (!queryTimer) {
+		// Only active in polling fallback mode, no-op with websocket subscriptions
 		queryTimer = setInterval(pollQuery, 5000);
 	}
 	if (!discoveryTimer) {
@@ -916,6 +1101,11 @@ const start = async function () {
  * Discovers and registers with the registry.
  */
 const connectToRegistry = async function () {
+	if (connecting) {
+		return;
+	}
+	connecting = true;
+
 	try {
 		const found = await discoverRegistry();
 		if (!found) {
@@ -924,11 +1114,13 @@ const connectToRegistry = async function () {
 		}
 
 		await registerAll();
-		await pollQuery();
+		await startQueryFeed();
 	} catch (error) {
 		log("Registry connection failed:", error.message);
 		registered = false;
 		sendStatus(null, "Registry connection failed: " + error.message);
+	} finally {
+		connecting = false;
 	}
 };
 
@@ -948,6 +1140,10 @@ const stop = async function () {
 		clearInterval(discoveryTimer);
 		discoveryTimer = null;
 	}
+	if (rebuildTimer) {
+		clearTimeout(rebuildTimer);
+		rebuildTimer = null;
+	}
 	if (httpServer) {
 		httpServer.close();
 		httpServer = null;
@@ -956,6 +1152,8 @@ const stop = async function () {
 		bonjour.destroy();
 		bonjour = null;
 	}
+	closeSubscriptions();
+	usePolling = false;
 
 	if (registered && registrationBase) {
 		try {
