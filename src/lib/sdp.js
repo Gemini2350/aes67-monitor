@@ -82,6 +82,12 @@ const isSupportedStream = function (sdp) {
 			sdp.unsupportedReason = "Unsupported channel number";
 			return sdp;
 		}
+
+		if (!sdp.media[i].ptime || sdp.media[i].ptime <= 0) {
+			sdp.isSupported = false;
+			sdp.unsupportedReason = "Missing ptime";
+			return sdp;
+		}
 	}
 
 	sdp.isSupported = true;

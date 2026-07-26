@@ -74,6 +74,15 @@ const log = function (...args) {
 	console.log("[NMOS]", ...args);
 };
 
+// The NMOS process must never take down the app: network sockets (mDNS,
+// websockets, HTTP) can emit errors at any time, e.g. on network changes.
+process.on("uncaughtException", (error) => {
+	log("Uncaught exception:", error.message);
+});
+process.on("unhandledRejection", (reason) => {
+	log("Unhandled rejection:", reason && reason.message ? reason.message : reason);
+});
+
 /**
  * HTTP JSON helper (fetch with timeout).
  */
@@ -147,7 +156,9 @@ const discoverRegistry = async function () {
 	// mDNS discovery
 	return new Promise((resolve) => {
 		if (!bonjour) {
-			bonjour = new Bonjour();
+			bonjour = new Bonjour(undefined, function (error) {
+				log("mDNS error:", error && error.message ? error.message : error);
+			});
 		}
 
 		let resolved = false;
@@ -417,6 +428,11 @@ const preParse = function (sdp) {
 			if (sdp.media[i].rtp[0].encoding < 1 || sdp.media[i].rtp[0].encoding > 64) {
 				sdp.isSupported = false;
 				sdp.unsupportedReason = "Unsupported channel number";
+				break;
+			}
+			if (!sdp.media[i].ptime || sdp.media[i].ptime <= 0) {
+				sdp.isSupported = false;
+				sdp.unsupportedReason = "Missing ptime";
 				break;
 			}
 		}

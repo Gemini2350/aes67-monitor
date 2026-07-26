@@ -6,7 +6,25 @@ let client;
 let streamOpen = false;
 let argsCache;
 
+// The audio process must never die silently: a dead child means no
+// multicast join and no audio until the app is restarted.
+process.on("uncaughtException", (error) => {
+	console.error("[AUDIO] Uncaught exception:", error.message);
+});
+
 const start = function (args) {
+	if (
+		!args ||
+		!args.ptime ||
+		args.ptime <= 0 ||
+		!args.samplerate ||
+		!args.channels ||
+		!args.selected
+	) {
+		console.error("[AUDIO] Invalid play arguments, not starting:", args);
+		return;
+	}
+
 	argsCache = args;
 	if (streamOpen) {
 		streamOpen = false;
@@ -24,7 +42,18 @@ const start = function (args) {
 	});
 
 	client.on("listening", function () {
-		client.addMembership(args.mcast, args.networkInterface);
+		try {
+			client.addMembership(args.mcast, args.networkInterface);
+		} catch (error) {
+			console.error(
+				"[AUDIO] Could not join multicast group",
+				args.mcast,
+				"on",
+				args.networkInterface,
+				"-",
+				error.message
+			);
+		}
 	});
 
 	// Constants
@@ -134,6 +163,10 @@ const start = function (args) {
 	}
 
 	if (!found) {
+		if (!defaultOutputDevice) {
+			console.error("[AUDIO] No usable output device found");
+			return;
+		}
 		console.log("Falling back to default device");
 		id = defaultOutputDevice.id;
 	}

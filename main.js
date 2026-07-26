@@ -65,10 +65,89 @@ switch (process.platform) {
 // Initialize RtAudio with the chosen API
 const rtAudio = new RtAudio(audioAPI);
 
-// Spawn child processes for SDP, Audio and NMOS functionalities
-const sdpProcess = fork(path.join(__dirname, "./src/lib/sdp.js"));
-const audioProcess = fork(path.join(__dirname, "./src/lib/audio.js"));
-const nmosProcess = fork(path.join(__dirname, "./src/lib/nmos.js"));
+// Child processes for SDP, Audio and NMOS functionalities
+let sdpProcess = null;
+let audioProcess = null;
+let nmosProcess = null;
+let isQuitting = false;
+
+/**
+ * Sends a message to a child process, ignoring dead or disconnected children.
+ * Prevents EPIPE crashes when a child process died.
+ */
+function safeSend(childProcess, message) {
+	if (childProcess && childProcess.connected) {
+		try {
+			childProcess.send(message, () => {});
+		} catch (error) {
+			console.error("Error sending to child process:", error.message);
+		}
+	}
+}
+
+/**
+ * Forks the SDP child process and restarts it if it dies.
+ */
+function forkSdpProcess() {
+	sdpProcess = fork(path.join(__dirname, "./src/lib/sdp.js"));
+	sdpProcess.on("message", handleSdpMessage);
+	sdpProcess.on("error", (error) => {
+		console.error("SDP process error:", error.message);
+	});
+	sdpProcess.on("exit", (code) => {
+		sdpProcess = null;
+		if (!isQuitting) {
+			console.error("SDP process died (code " + code + "), restarting in 2s");
+			setTimeout(() => {
+				// Re-initialize (interface, timeouts, manual streams) via updateSystem
+				isSDPInitialized = false;
+				forkSdpProcess();
+			}, 2000);
+		}
+	});
+}
+
+/**
+ * Forks the audio child process and restarts it if it dies.
+ */
+function forkAudioProcess() {
+	audioProcess = fork(path.join(__dirname, "./src/lib/audio.js"));
+	audioProcess.on("error", (error) => {
+		console.error("Audio process error:", error.message);
+	});
+	audioProcess.on("exit", (code) => {
+		audioProcess = null;
+		if (!isQuitting) {
+			console.error("Audio process died (code " + code + "), restarting in 2s");
+			setTimeout(forkAudioProcess, 2000);
+		}
+	});
+}
+
+/**
+ * Forks the NMOS child process and restarts it if it dies.
+ */
+function forkNmosProcess() {
+	nmosProcess = fork(path.join(__dirname, "./src/lib/nmos.js"));
+	nmosProcess.on("message", handleNmosMessage);
+	nmosProcess.on("error", (error) => {
+		console.error("NMOS process error:", error.message);
+	});
+	nmosProcess.on("exit", (code) => {
+		nmosProcess = null;
+		if (!isQuitting) {
+			console.error("NMOS process died (code " + code + "), restarting in 2s");
+			setTimeout(() => {
+				forkNmosProcess();
+				sendNmosConfig();
+			}, 2000);
+		}
+	});
+}
+
+forkSdpProcess();
+forkAudioProcess();
+forkNmosProcess();
 
 /**
  * Creates and configures the main application window.
@@ -114,15 +193,15 @@ function handleIpcMessage(message) {
 		case "update":
 			sendMessage("updatePersistentData", persistentData);
 			updateSystem();
-			sdpProcess.send({ type: "update" });
-			nmosProcess.send({ type: "update" });
+			safeSend(sdpProcess, { type: "update" });
+			safeSend(nmosProcess, { type: "update" });
 			break;
 		case "setAudioInterface":
 			setAudioInterface(message.data);
 			break;
 		case "restart":
 			refreshCurrentAudioInterface();
-			audioProcess.send({
+			safeSend(audioProcess, {
 				type: "restart",
 				data: {
 					networkInterface: currentNetworkInterface.address,
@@ -138,27 +217,27 @@ function handleIpcMessage(message) {
 				networkInterface: currentNetworkInterface.address,
 				selected: currentAudioDevice,
 			};
-			audioProcess.send({ type: "start", data: playArgs });
+			safeSend(audioProcess, { type: "start", data: playArgs });
 
 			// Reflect NMOS sender playback in the registered receiver
 			if (message.data.nmos) {
-				nmosProcess.send({
+				safeSend(nmosProcess, {
 					type: "connected",
 					data: { senderId: message.data.id, sdp: message.data.sdp },
 				});
 			} else {
-				nmosProcess.send({ type: "disconnected" });
+				safeSend(nmosProcess, { type: "disconnected" });
 			}
 			break;
 		case "stop":
-			audioProcess.send({ type: "stop" });
-			nmosProcess.send({ type: "disconnected" });
+			safeSend(audioProcess, { type: "stop" });
+			safeSend(nmosProcess, { type: "disconnected" });
 			break;
 		case "addStream":
-			sdpProcess.send({ type: "add", data: message.data });
+			safeSend(sdpProcess, { type: "add", data: message.data });
 			break;
 		case "delete":
-			sdpProcess.send({ type: "delete", data: message.data });
+			safeSend(sdpProcess, { type: "delete", data: message.data });
 			break;
 		case "setNetwork":
 			if (currentNetworkInterface.address != message.data) {
@@ -166,8 +245,8 @@ function handleIpcMessage(message) {
 				currentNetworkInterface.address = message.data;
 				updateNetworkInterfaces();
 				store.set("interface", currentNetworkInterface);
-				audioProcess.send({ type: "stop" });
-				sdpProcess.send({
+				safeSend(audioProcess, { type: "stop" });
+				safeSend(sdpProcess, {
 					type: "interface",
 					data: currentNetworkInterface.address,
 				});
@@ -178,7 +257,7 @@ function handleIpcMessage(message) {
 			store.set("persistentData", persistentData);
 
 			if (message.key == "settings") {
-				sdpProcess.send({
+				safeSend(sdpProcess, {
 					type: "deleteTimeout",
 					data: persistentData.settings.sdpDeleteTimeout,
 				});
@@ -248,10 +327,10 @@ function updateNetworkInterfaces() {
 			currentNetworkInterface = addresses[0];
 			addresses[0].isCurrent = true;
 			store.set("interface", currentNetworkInterface);
-			audioProcess.send({ type: "stop" });
+			safeSend(audioProcess, { type: "stop" });
 
 			if (isSDPInitialized) {
-				sdpProcess.send({
+				safeSend(sdpProcess, {
 					type: "interface",
 					data: currentNetworkInterface.address,
 				});
@@ -336,7 +415,7 @@ function sendNmosConfig() {
 		return;
 	}
 
-	nmosProcess.send({
+	safeSend(nmosProcess, {
 		type: "config",
 		data: {
 			config: {
@@ -371,11 +450,11 @@ function updateSystem() {
 		sendLog("SDP is not yet initialized");
 
 		isSDPInitialized = true;
-		sdpProcess.send({
+		safeSend(sdpProcess, {
 			type: "init",
 			data: currentNetworkInterface.address,
 		});
-		sdpProcess.send({
+		safeSend(sdpProcess, {
 			type: "deleteTimeout",
 			data: persistentData.settings.sdpDeleteTimeout,
 		});
@@ -391,7 +470,7 @@ function updateSystem() {
 			for (const stream of storedStreams) {
 				if (stream.manual) {
 					console.log("Loading stream", stream.name);
-					sdpProcess.send({
+					safeSend(sdpProcess, {
 						type: "add",
 						data: {
 							sdp: stream.raw,
@@ -408,7 +487,7 @@ function updateSystem() {
 }
 
 // Handle messages from the SDP child process
-sdpProcess.on("message", (data) => {
+function handleSdpMessage(data) {
 	sendMessage("streams", data);
 
 	// Combine raw stream data for hashing
@@ -422,10 +501,10 @@ sdpProcess.on("message", (data) => {
 		streamsHash = newHash;
 		store.set("streams", data);
 	}
-});
+}
 
 // Handle messages from the NMOS child process
-nmosProcess.on("message", (message) => {
+function handleNmosMessage(message) {
 	switch (message.type) {
 		case "streams":
 			sendMessage("nmosStreams", message.data);
@@ -439,11 +518,11 @@ nmosProcess.on("message", (message) => {
 			break;
 		case "disconnect":
 			// Receiver was disconnected externally via IS-05: stop playback
-			audioProcess.send({ type: "stop" });
+			safeSend(audioProcess, { type: "stop" });
 			sendMessage("nmosPlaying", { id: "", stream: null });
 			break;
 	}
-});
+}
 
 /**
  * Starts playback of a stream that was connected externally via IS-05.
@@ -464,7 +543,7 @@ function playNmosStream(stream) {
 		filterAddr = stream.media[0].sourceFilter.srcList;
 	}
 
-	audioProcess.send({
+	safeSend(audioProcess, {
 		type: "start",
 		data: {
 			id: stream.id,
