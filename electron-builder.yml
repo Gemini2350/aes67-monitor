@@ -8,6 +8,18 @@ afterPack: scripts/afterPack.js
 # OS specific settings
 mac:
   icon: "icon/icon.ico"
+  # Required so macOS shows the Local Network permission prompt
+  # (multicast RTP/SAP reception and mDNS registry discovery).
+  extendInfo:
+    NSLocalNetworkUsageDescription: >-
+      Stream Monitor discovers and receives AES67/NMOS audio streams
+      (SAP, RTP multicast) and locates NMOS registries via mDNS on the
+      local network.
+    NSBonjourServices:
+      - _nmos-register._tcp
+      - _nmos-registration._tcp
+      - _nmos-query._tcp
+      - _http._tcp
   target:
     - target: dmg
       arch: [x64, arm64]
