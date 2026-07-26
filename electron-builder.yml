@@ -3,6 +3,7 @@ productName: "Stream Monitor"
 artifactName: "${name}-${version}-${os}-${arch}.${ext}"
 directories:
   output: release-builds
+afterPack: scripts/afterPack.js
 
 # OS specific settings
 mac:
