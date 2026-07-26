@@ -13,7 +13,7 @@
 		<ul>
 			<li id="streams-li" :class="{ active: page === 'streams' }">
 				<a @click="viewPage('streams')">
-					<i class="bi bi-speaker"></i><span>Streams</span>
+					<i class="bi bi-speaker"></i><span>SAP Streams</span>
 					<span
 						class="badge bg-primary"
 						@click.stop="streamCountDisplay = !streamCountDisplay"
@@ -21,6 +21,16 @@
 						<template v-if="streamCountDisplay">{{ visibleStreams }}</template>
 						<template v-else>{{ channelCount }}</template>
 					</span>
+				</a>
+			</li>
+			<li id="nmos-streams-li" :class="{ active: page === 'nmosstreams' }">
+				<a @click="viewPage('nmosstreams')">
+					<i class="bi bi-diagram-3"></i><span>NMOS Streams</span>
+					<span
+						class="badge bg-primary"
+						v-if="persistentData.settings.nmosEnabled"
+						>{{ nmosStreamCount }}</span
+					>
 				</a>
 			</li>
 			<li id="devices-li" :class="{ active: page === 'devices' }">
@@ -56,6 +66,7 @@ import {
 	setSidebarStatus,
 	searchDevices,
 	visibleStreams,
+	nmosStreamCount,
 } from "../app.js";
 
 export default {
@@ -71,6 +82,7 @@ export default {
 			setSidebarStatus,
 			searchDevices,
 			visibleStreams,
+			nmosStreamCount,
 		};
 	},
 };

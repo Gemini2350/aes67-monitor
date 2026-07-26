@@ -13,15 +13,37 @@ const store = new Store();
 let mainWindow; // Main application window
 let networkInterfaces = []; // List of available network interfaces
 let currentNetworkInterface = store.get("interface");
-let persistentData = store.get("persistentData", {
-	settings: {
-		bufferSize: 16,
-		bufferEnabled: true,
-		hideUnsupported: true,
-		sdpDeleteTimeout: 300,
-		sidebarCollapsed: false,
-	},
-});
+const defaultSettings = {
+	bufferSize: 16,
+	bufferEnabled: true,
+	hideUnsupported: true,
+	sdpDeleteTimeout: 300,
+	sidebarCollapsed: false,
+	nmosEnabled: false,
+	nmosMode: "mdns",
+	nmosRegistryHost: "",
+	nmosRegistryPort: 80,
+	nmosDnsServer: "",
+	nmosDomain: "",
+	nmosNodePort: 3212,
+};
+let persistentData = store.get("persistentData", { settings: {} });
+persistentData.settings = Object.assign(
+	{},
+	defaultSettings,
+	persistentData.settings
+);
+
+// Persistent NMOS resource IDs (node, device, receiver)
+let nmosIds = store.get("nmosIds");
+if (!nmosIds) {
+	nmosIds = {
+		node: crypto.randomUUID(),
+		device: crypto.randomUUID(),
+		receiver: crypto.randomUUID(),
+	};
+	store.set("nmosIds", nmosIds);
+}
 let currentAudioDevice = null;
 let audioAPI = RtAudioApi.UNSPECIFIED;
 let isSDPInitialized = false;
@@ -43,9 +65,10 @@ switch (process.platform) {
 // Initialize RtAudio with the chosen API
 const rtAudio = new RtAudio(audioAPI);
 
-// Spawn child processes for SDP and Audio functionalities
+// Spawn child processes for SDP, Audio and NMOS functionalities
 const sdpProcess = fork(path.join(__dirname, "./src/lib/sdp.js"));
 const audioProcess = fork(path.join(__dirname, "./src/lib/audio.js"));
+const nmosProcess = fork(path.join(__dirname, "./src/lib/nmos.js"));
 
 /**
  * Creates and configures the main application window.
@@ -92,6 +115,7 @@ function handleIpcMessage(message) {
 			sendMessage("updatePersistentData", persistentData);
 			updateSystem();
 			sdpProcess.send({ type: "update" });
+			nmosProcess.send({ type: "update" });
 			break;
 		case "setAudioInterface":
 			setAudioInterface(message.data);
@@ -115,9 +139,20 @@ function handleIpcMessage(message) {
 				selected: currentAudioDevice,
 			};
 			audioProcess.send({ type: "start", data: playArgs });
+
+			// Reflect NMOS sender playback in the registered receiver
+			if (message.data.nmos) {
+				nmosProcess.send({
+					type: "connected",
+					data: { senderId: message.data.id, sdp: message.data.sdp },
+				});
+			} else {
+				nmosProcess.send({ type: "disconnected" });
+			}
 			break;
 		case "stop":
 			audioProcess.send({ type: "stop" });
+			nmosProcess.send({ type: "disconnected" });
 			break;
 		case "addStream":
 			sdpProcess.send({ type: "add", data: message.data });
@@ -147,6 +182,7 @@ function handleIpcMessage(message) {
 					type: "deleteTimeout",
 					data: persistentData.settings.sdpDeleteTimeout,
 				});
+				sendNmosConfig();
 			}
 
 			break;
@@ -293,6 +329,37 @@ function refreshCurrentAudioInterface() {
 }
 
 /**
+ * Sends the current NMOS configuration to the NMOS child process.
+ */
+function sendNmosConfig() {
+	if (!currentNetworkInterface) {
+		return;
+	}
+
+	nmosProcess.send({
+		type: "config",
+		data: {
+			config: {
+				enabled: persistentData.settings.nmosEnabled,
+				mode: persistentData.settings.nmosMode,
+				host: persistentData.settings.nmosRegistryHost,
+				port: persistentData.settings.nmosRegistryPort,
+				dnsServer: persistentData.settings.nmosDnsServer,
+				domain: persistentData.settings.nmosDomain,
+				nodePort: persistentData.settings.nmosNodePort,
+				label: "AES67 Stream Monitor",
+				ids: nmosIds,
+			},
+			interface: {
+				address: currentNetworkInterface.address,
+				name: currentNetworkInterface.name,
+				mac: currentNetworkInterface.mac,
+			},
+		},
+	});
+}
+
+/**
  * Updates the system settings, network interfaces, and initializes SDP if necessary.
  */
 function updateSystem() {
@@ -337,6 +404,7 @@ function updateSystem() {
 	}
 
 	sendMessage("interfaces", networkInterfaces);
+	sendNmosConfig();
 }
 
 // Handle messages from the SDP child process
@@ -356,6 +424,71 @@ sdpProcess.on("message", (data) => {
 	}
 });
 
+// Handle messages from the NMOS child process
+nmosProcess.on("message", (message) => {
+	switch (message.type) {
+		case "streams":
+			sendMessage("nmosStreams", message.data);
+			break;
+		case "status":
+			sendMessage("nmosStatus", message.data);
+			break;
+		case "connect":
+			// Receiver was connected externally via IS-05: start playback
+			playNmosStream(message.data);
+			break;
+		case "disconnect":
+			// Receiver was disconnected externally via IS-05: stop playback
+			audioProcess.send({ type: "stop" });
+			sendMessage("nmosPlaying", { id: "", stream: null });
+			break;
+	}
+});
+
+/**
+ * Starts playback of a stream that was connected externally via IS-05.
+ * Defaults to the first stereo pair (or mono channel).
+ * @param {Object} stream - The parsed stream object from the NMOS process.
+ */
+function playNmosStream(stream) {
+	if (!stream || !stream.isSupported || !stream.media[0]) {
+		return;
+	}
+
+	refreshCurrentAudioInterface();
+
+	let filter = false;
+	let filterAddr = "";
+	if (stream.media[0].sourceFilter) {
+		filter = true;
+		filterAddr = stream.media[0].sourceFilter.srcList;
+	}
+
+	audioProcess.send({
+		type: "start",
+		data: {
+			id: stream.id,
+			mcast: stream.mcast,
+			port: stream.media[0].port,
+			codec: stream.codec,
+			ptime: stream.media[0].ptime,
+			samplerate: stream.samplerate,
+			channels: stream.channels,
+			ch1Map: 0,
+			ch2Map: stream.channels > 1 ? 1 : 0,
+			jitterBufferEnabled: persistentData.settings.bufferEnabled,
+			jitterBufferSize: persistentData.settings.bufferSize,
+			filter: filter,
+			filterAddr: filterAddr,
+			audioAPI: audioAPI,
+			networkInterface: currentNetworkInterface.address,
+			selected: currentAudioDevice,
+		},
+	});
+
+	sendMessage("nmosPlaying", { id: stream.id, stream: stream });
+}
+
 // Initialize the application when ready
 app.whenReady().then(() => {
 	createMainWindow();
@@ -371,6 +504,7 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
 	sdpProcess.kill();
 	audioProcess.kill();
+	nmosProcess.kill();
 	app.quit();
 });
 

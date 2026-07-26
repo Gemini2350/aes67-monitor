@@ -1,7 +1,12 @@
 import { ref, computed } from "vue";
 
 export const page = ref("streams");
-export const search = ref({ streams: "", interfaces: "", devices: "" });
+export const search = ref({
+	streams: "",
+	interfaces: "",
+	devices: "",
+	nmosstreams: "",
+});
 export const streamCount = ref(0);
 export const channelCount = ref(0);
 export const interfaceCount = ref(0);
@@ -14,6 +19,14 @@ export const selectedChannel = ref([]);
 export const streamIndex = ref([]);
 export const visibleStreams = ref(0);
 export const playing = ref("");
+export const nmosStreams = ref([]);
+export const nmosStatus = ref({
+	enabled: false,
+	registered: false,
+	registry: null,
+	error: null,
+});
+export const streamSourcePage = ref("streams");
 export const persistentData = ref({
 	settings: {
 		bufferSize: 16,
@@ -21,6 +34,13 @@ export const persistentData = ref({
 		hideUnsupported: true,
 		sdpDeleteTimeout: 300,
 		sidebarCollapsed: false,
+		nmosEnabled: false,
+		nmosMode: "mdns",
+		nmosRegistryHost: "",
+		nmosRegistryPort: 80,
+		nmosDnsServer: "",
+		nmosDomain: "",
+		nmosNodePort: 3212,
 	},
 });
 
@@ -40,7 +60,7 @@ export const isBackBtnActive = () => {
 export const goBack = () => {
 	switch (page.value) {
 		case "stream":
-			page.value = "streams";
+			page.value = streamSourcePage.value;
 			break;
 		case "sdp":
 			page.value = "streams";
@@ -56,13 +76,21 @@ export const getTitle = () => {
 			return "Add Stream";
 		case "interfaces":
 			return "Audio Interfaces";
+		case "streams":
+			return "SAP Streams";
+		case "nmosstreams":
+			return "NMOS Streams";
 	}
 
 	return page.value.charAt(0).toUpperCase() + page.value.slice(1);
 };
 
 export const isPageSearchable = () => {
-	if (page.value == "streams" || page.value == "devices") {
+	if (
+		page.value == "streams" ||
+		page.value == "devices" ||
+		page.value == "nmosstreams"
+	) {
 		return true;
 	}
 
@@ -79,9 +107,11 @@ export const viewPage = (newPage) => {
 export const getPageTitle = () => {
 	switch (page.value) {
 		case "stream":
-			return "Streams";
+			return streamSourcePage.value == "nmosstreams"
+				? "NMOS Streams"
+				: "SAP Streams";
 		case "sdp":
-			return "Streams";
+			return "SAP Streams";
 	}
 };
 
@@ -159,9 +189,35 @@ export const getTextareaRowNumber = () => {
 };
 
 export const viewStream = (stream) => {
+	streamSourcePage.value = page.value == "nmosstreams" ? "nmosstreams" : "streams";
 	page.value = "stream";
 	selectedStream.value = stream;
 };
+
+export const nmosStreamCount = computed(() => {
+	return nmosStreams.value.reduce(
+		(count, device) => count + device.streams.length,
+		0
+	);
+});
+
+export const searchNmosStreams = computed(() => {
+	const term = search.value.nmosstreams.toLowerCase();
+
+	return nmosStreams.value
+		.map((device) => {
+			const streams = device.streams.filter((stream) => {
+				return (
+					(stream.name || "").toLowerCase().includes(term) ||
+					device.label.toLowerCase().includes(term) ||
+					(device.nodeLabel || "").toLowerCase().includes(term) ||
+					stream.id.includes(term)
+				);
+			});
+			return { ...device, streams };
+		})
+		.filter((device) => device.streams.length > 0);
+});
 
 export const isDevMode = () => {
 	return process.env.NODE_ENV === "development";
@@ -264,6 +320,8 @@ export const playStream = (stream) => {
 
 			let data = {
 				id: stream.id,
+				nmos: !!stream.nmos,
+				sdp: stream.nmos ? stream.raw : undefined,
 				mcast: mcast,
 				port: port,
 				codec: codec,
@@ -347,6 +405,16 @@ if (window.electronAPI) {
 				break;
 			case "updatePersistentData":
 				persistentData.value = message.data;
+				break;
+			case "nmosStreams":
+				nmosStreams.value = message.data;
+				break;
+			case "nmosStatus":
+				nmosStatus.value = message.data;
+				break;
+			case "nmosPlaying":
+				// Playback state changed by an external IS-05 connection
+				playing.value = message.data.id;
 				break;
 			default:
 				console.log(message.type, message.data);

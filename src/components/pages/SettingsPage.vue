@@ -81,10 +81,123 @@
 			</div>
 		</div>
 	</div>
+	<hr />
+	<div class="row">
+		<div class="col-4">
+			<h5 class="mb-3">NMOS</h5>
+			<div class="form-check mb-3">
+				<input
+					class="form-check-input"
+					type="checkbox"
+					id="check-nmos-enabled"
+					v-model="persistentData.settings.nmosEnabled"
+				/>
+				<label class="form-check-label" for="check-nmos-enabled">
+					Enable NMOS (IS-04 / IS-05)
+				</label>
+			</div>
+			<div class="form-text mb-3">
+				Registers a receiver in the NMOS registry which can be connected via
+				IS-05 or from the NMOS Streams page.
+			</div>
+			<label for="nmos-node-port-input" class="form-label">Node API Port</label>
+			<div class="input-group mb-3">
+				<input
+					type="number"
+					id="nmos-node-port-input"
+					v-model.number="persistentData.settings.nmosNodePort"
+					class="form-control"
+					:disabled="!persistentData.settings.nmosEnabled"
+				/>
+			</div>
+		</div>
+		<div class="col-4">
+			<h5 class="mb-3">Registry Discovery</h5>
+			<select
+				class="form-select mb-3"
+				v-model="persistentData.settings.nmosMode"
+				:disabled="!persistentData.settings.nmosEnabled"
+			>
+				<option value="mdns">mDNS (multicast DNS-SD)</option>
+				<option value="unicast">DNS-SD Unicast</option>
+				<option value="static">Static Registry Address</option>
+			</select>
+			<template v-if="persistentData.settings.nmosMode == 'static'">
+				<label for="nmos-registry-host-input" class="form-label"
+					>Registry IP / Host</label
+				>
+				<div class="input-group mb-3">
+					<input
+						type="text"
+						id="nmos-registry-host-input"
+						v-model="persistentData.settings.nmosRegistryHost"
+						class="form-control"
+						placeholder="192.168.1.10"
+						:disabled="!persistentData.settings.nmosEnabled"
+					/>
+				</div>
+				<label for="nmos-registry-port-input" class="form-label"
+					>Registry Port</label
+				>
+				<div class="input-group mb-3">
+					<input
+						type="number"
+						id="nmos-registry-port-input"
+						v-model.number="persistentData.settings.nmosRegistryPort"
+						class="form-control"
+						:disabled="!persistentData.settings.nmosEnabled"
+					/>
+				</div>
+			</template>
+			<template v-if="persistentData.settings.nmosMode == 'unicast'">
+				<label for="nmos-dns-server-input" class="form-label"
+					>DNS Server</label
+				>
+				<div class="input-group mb-3">
+					<input
+						type="text"
+						id="nmos-dns-server-input"
+						v-model="persistentData.settings.nmosDnsServer"
+						class="form-control"
+						placeholder="192.168.1.1"
+						:disabled="!persistentData.settings.nmosEnabled"
+					/>
+				</div>
+				<label for="nmos-domain-input" class="form-label"
+					>Search Domain</label
+				>
+				<div class="input-group mb-3">
+					<input
+						type="text"
+						id="nmos-domain-input"
+						v-model="persistentData.settings.nmosDomain"
+						class="form-control"
+						placeholder="nmos.example.com"
+						:disabled="!persistentData.settings.nmosEnabled"
+					/>
+				</div>
+			</template>
+		</div>
+		<div class="col-4">
+			<h5 class="mb-3">Status</h5>
+			<div class="form-text mb-3" v-if="!persistentData.settings.nmosEnabled">
+				NMOS is disabled.
+			</div>
+			<div class="form-text mb-3" v-else-if="nmosStatus.registered">
+				<i class="bi bi-check-circle-fill text-success me-1"></i>
+				Registered with registry at {{ nmosStatus.registry }}
+			</div>
+			<div class="form-text mb-3" v-else-if="nmosStatus.error">
+				<i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>
+				{{ nmosStatus.error }}
+			</div>
+			<div class="form-text mb-3" v-else>Searching for registry...</div>
+		</div>
+	</div>
 </template>
 
 <script>
-import { persistentData, networkInterfaces } from "../../app.js";
+import { persistentData, networkInterfaces, nmosStatus } from "../../app.js";
 
 export default {
 	name: "SettingsPage",
@@ -92,6 +205,7 @@ export default {
 		return {
 			persistentData,
 			networkInterfaces,
+			nmosStatus,
 		};
 	},
 };

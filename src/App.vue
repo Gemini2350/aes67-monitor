@@ -17,6 +17,7 @@ import { persistentData, page } from "./app.js";
 import HeaderBar from "./components/HeaderBar.vue";
 import SideBar from "./components/SideBar.vue";
 import Streams from "./components/pages/StreamsPage.vue";
+import NmosStreams from "./components/pages/NmosStreamsPage.vue";
 import Stream from "./components/pages/StreamPage.vue";
 import Devices from "./components/pages/DevicesPage.vue";
 import Interfaces from "./components/pages/InterfacesPage.vue";
@@ -41,6 +42,8 @@ const currentComponent = computed(() => {
 	switch (page.value) {
 		case "streams":
 			return Streams;
+		case "nmosstreams":
+			return NmosStreams;
 		case "devices":
 			return Devices;
 		case "interfaces":
